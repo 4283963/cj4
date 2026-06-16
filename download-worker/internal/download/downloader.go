@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"download-worker/internal/config"
@@ -194,18 +195,30 @@ func (d *Downloader) downloadWithRetry(ctx context.Context, task model.DownloadT
 func (d *Downloader) GetFileInfo(ctx context.Context, url string) (int64, string, error) {
 	req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)
 	if err != nil {
-		return 0, "", err
+		return 0, "", fmt.Errorf("创建请求失败: %w", err)
 	}
 	req.Header.Set("User-Agent", d.cfg.UserAgent)
 
 	resp, err := d.httpClient.Do(req)
 	if err != nil {
-		return 0, "", err
+		return 0, "", fmt.Errorf("连接服务器失败: %w", err)
 	}
 	defer resp.Body.Close()
 
+	switch resp.StatusCode {
+	case 404:
+		return 0, "", fmt.Errorf("文件不存在 (404 Not Found)")
+	case 401, 403:
+		return 0, "", fmt.Errorf("无权限访问该文件 (%d)", resp.StatusCode)
+	case 429:
+		return 0, "", fmt.Errorf("请求过于频繁，被服务器限流")
+	}
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return 0, "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		if resp.StatusCode >= 500 {
+			return 0, "", fmt.Errorf("服务器错误: %d (可重试)", resp.StatusCode)
+		}
+		return 0, "", fmt.Errorf("无法访问文件，状态码: %d", resp.StatusCode)
 	}
 
 	var fileType string
@@ -214,4 +227,28 @@ func (d *Downloader) GetFileInfo(ctx context.Context, url string) (int64, string
 	}
 
 	return resp.ContentLength, fileType, nil
+}
+
+func (d *Downloader) CheckDiskSpace(downloadDir string, requiredSize int64) error {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(downloadDir, &stat); err != nil {
+		return fmt.Errorf("检查磁盘空间失败: %w", err)
+	}
+
+	availableBytes := stat.Bavail * uint64(stat.Bsize)
+	reservedBytes := int64(1024 * 1024 * 1024)
+	availableForUse := int64(availableBytes) - reservedBytes
+
+	if requiredSize > 0 && availableForUse < requiredSize {
+		return fmt.Errorf("磁盘空间不足，需要 %.2f GB，可用 %.2f GB（已预留 1 GB）",
+			float64(requiredSize)/1024/1024/1024,
+			float64(availableForUse)/1024/1024/1024)
+	}
+
+	if availableForUse < 100*1024*1024 {
+		return fmt.Errorf("磁盘空间过低，仅剩 %.2f MB（已预留 1 GB）",
+			float64(availableForUse)/1024/1024)
+	}
+
+	return nil
 }

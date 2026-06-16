@@ -11,7 +11,11 @@ import com.clouddisk.offline.enums.TaskStatus;
 import com.clouddisk.offline.mq.DownloadTaskProducer;
 import com.clouddisk.offline.repository.OfflineDownloadTaskRepository;
 import com.clouddisk.offline.repository.TenantStorageRepository;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import jakarta.transaction.Transactional;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -22,14 +26,20 @@ import java.net.URL;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 @Service
 public class OfflineDownloadService {
+
+    private static final Logger log = LoggerFactory.getLogger(OfflineDownloadService.class);
 
     private final OfflineDownloadTaskRepository taskRepository;
     private final TenantStorageRepository tenantStorageRepository;
     private final TaskCacheService taskCacheService;
     private final DownloadTaskProducer taskProducer;
+
+    private final Cache<String, Long> progressCallbackCache;
+    private final Cache<String, Boolean> failedTaskCache;
 
     @Value("${offline.download.callback.secret}")
     private String callbackSecret;
@@ -45,6 +55,16 @@ public class OfflineDownloadService {
         this.tenantStorageRepository = tenantStorageRepository;
         this.taskCacheService = taskCacheService;
         this.taskProducer = taskProducer;
+
+        this.progressCallbackCache = Caffeine.newBuilder()
+                .maximumSize(1000)
+                .expireAfterWrite(5, TimeUnit.SECONDS)
+                .build();
+
+        this.failedTaskCache = Caffeine.newBuilder()
+                .maximumSize(500)
+                .expireAfterWrite(10, TimeUnit.MINUTES)
+                .build();
     }
 
     @Transactional
@@ -114,12 +134,25 @@ public class OfflineDownloadService {
     @Transactional
     public boolean handleCallback(DownloadCallbackRequest request) {
         if (!callbackSecret.equals(request.getCallbackSecret())) {
+            log.warn("Invalid callback secret for task {}", request.getTaskId());
             return false;
+        }
+
+        if (failedTaskCache.getIfPresent(request.getTaskId()) != null) {
+            log.debug("Task {} already marked as failed, skipping callback", request.getTaskId());
+            return true;
         }
 
         OfflineDownloadTask task = taskRepository.findById(request.getTaskId()).orElse(null);
         if (task == null) {
+            log.warn("Task {} not found for callback", request.getTaskId());
             return false;
+        }
+
+        if (task.getStatus() == TaskStatus.COMPLETED || task.getStatus() == TaskStatus.FAILED) {
+            log.debug("Task {} already in terminal state: {}, skipping callback", 
+                    request.getTaskId(), task.getStatus());
+            return true;
         }
 
         LocalDateTime now = LocalDateTime.now();
@@ -127,52 +160,115 @@ public class OfflineDownloadService {
         try {
             newStatus = TaskStatus.valueOf(request.getStatus().toUpperCase());
         } catch (IllegalArgumentException e) {
+            log.warn("Invalid status {} for task {}", request.getStatus(), request.getTaskId());
             return false;
         }
 
-        switch (newStatus) {
-            case DOWNLOADING:
-                taskRepository.updateProgress(request.getTaskId(), newStatus,
-                        request.getDownloadedSize(), request.getSpeed(), now);
-                taskCacheService.updateTaskStatus(request.getTaskId(), newStatus.name());
-                break;
+        try {
+            switch (newStatus) {
+                case DOWNLOADING:
+                    handleDownloadingCallback(request, task, now);
+                    break;
 
-            case COMPLETED:
-                TenantStorage storage = tenantStorageRepository.findByTenantId(task.getTenantId()).orElse(null);
-                if (storage == null || storage.getRemainingCapacity() < request.getFileSize()) {
-                    taskRepository.updateFailed(request.getTaskId(), TaskStatus.FAILED,
-                            "租户存储空间不足", now);
-                    taskCacheService.updateTaskStatus(request.getTaskId(), TaskStatus.FAILED.name());
-                    return false;
-                }
+                case COMPLETED:
+                    return handleCompletedCallback(request, task, now);
 
-                int deducted = tenantStorageRepository.deductCapacity(task.getTenantId(), request.getFileSize());
-                if (deducted == 0) {
-                    taskRepository.updateFailed(request.getTaskId(), TaskStatus.FAILED,
-                            "扣减存储空间失败", now);
-                    taskCacheService.updateTaskStatus(request.getTaskId(), TaskStatus.FAILED.name());
-                    return false;
-                }
+                case FAILED:
+                    handleFailedCallback(request, task, now);
+                    break;
 
-                taskRepository.updateCompleted(request.getTaskId(), newStatus,
-                        request.getFileSize(), request.getFileName(),
-                        request.getFileType(), request.getSavePath(), now, now);
-                taskCacheService.removeTask(request.getTaskId());
-                break;
-
-            case FAILED:
-                taskRepository.updateFailed(request.getTaskId(), newStatus,
-                        request.getErrorMessage(), now);
-                taskCacheService.updateTaskStatus(request.getTaskId(), TaskStatus.FAILED.name());
-                break;
-
-            default:
-                taskRepository.updateStatus(request.getTaskId(), newStatus, now);
-                taskCacheService.updateTaskStatus(request.getTaskId(), newStatus.name());
-                break;
+                default:
+                    handleStatusCallback(request, task, newStatus, now);
+                    break;
+            }
+        } catch (Exception e) {
+            log.error("Error handling callback for task {}: {}", request.getTaskId(), e.getMessage(), e);
+            return false;
         }
 
         return true;
+    }
+
+    private void handleDownloadingCallback(DownloadCallbackRequest request, OfflineDownloadTask task, LocalDateTime now) {
+        Long lastCallbackTime = progressCallbackCache.getIfPresent(request.getTaskId());
+        long currentTime = System.currentTimeMillis();
+
+        if (lastCallbackTime != null && (currentTime - lastCallbackTime) < 3000) {
+            log.debug("Progress callback too frequent for task {}, skipping DB update", request.getTaskId());
+            taskCacheService.updateTaskStatus(request.getTaskId(), TaskStatus.DOWNLOADING.name());
+            return;
+        }
+
+        progressCallbackCache.put(request.getTaskId(), currentTime);
+
+        try {
+            taskRepository.updateProgress(request.getTaskId(), TaskStatus.DOWNLOADING,
+                    request.getDownloadedSize(), request.getSpeed(), now);
+        } catch (Exception e) {
+            log.warn("Failed to update progress in DB for task {}: {}", request.getTaskId(), e.getMessage());
+        }
+
+        taskCacheService.updateTaskStatus(request.getTaskId(), TaskStatus.DOWNLOADING.name());
+    }
+
+    private boolean handleCompletedCallback(DownloadCallbackRequest request, OfflineDownloadTask task, LocalDateTime now) {
+        TenantStorage storage = tenantStorageRepository.findByTenantId(task.getTenantId()).orElse(null);
+        if (storage == null || storage.getRemainingCapacity() < request.getFileSize()) {
+            log.warn("Insufficient storage for task {}, tenant: {}, required: {}, remaining: {}",
+                    request.getTaskId(), task.getTenantId(), request.getFileSize(),
+                    storage != null ? storage.getRemainingCapacity() : 0);
+
+            taskRepository.updateFailed(request.getTaskId(), TaskStatus.FAILED,
+                    "租户存储空间不足", now);
+            taskCacheService.updateTaskStatus(request.getTaskId(), TaskStatus.FAILED.name());
+            failedTaskCache.put(request.getTaskId(), true);
+            return false;
+        }
+
+        int deducted;
+        try {
+            deducted = tenantStorageRepository.deductCapacity(task.getTenantId(), request.getFileSize());
+        } catch (Exception e) {
+            log.error("Failed to deduct capacity for task {}: {}", request.getTaskId(), e.getMessage());
+            taskRepository.updateFailed(request.getTaskId(), TaskStatus.FAILED,
+                    "扣减存储空间失败: " + e.getMessage(), now);
+            taskCacheService.updateTaskStatus(request.getTaskId(), TaskStatus.FAILED.name());
+            failedTaskCache.put(request.getTaskId(), true);
+            return false;
+        }
+
+        if (deducted == 0) {
+            taskRepository.updateFailed(request.getTaskId(), TaskStatus.FAILED,
+                    "扣减存储空间失败", now);
+            taskCacheService.updateTaskStatus(request.getTaskId(), TaskStatus.FAILED.name());
+            failedTaskCache.put(request.getTaskId(), true);
+            return false;
+        }
+
+        taskRepository.updateCompleted(request.getTaskId(), TaskStatus.COMPLETED,
+                request.getFileSize(), request.getFileName(),
+                request.getFileType(), request.getSavePath(), now, now);
+        taskCacheService.removeTask(request.getTaskId());
+
+        log.info("Task {} completed successfully, file size: {} bytes", request.getTaskId(), request.getFileSize());
+        return true;
+    }
+
+    private void handleFailedCallback(DownloadCallbackRequest request, OfflineDownloadTask task, LocalDateTime now) {
+        taskRepository.updateFailed(request.getTaskId(), TaskStatus.FAILED,
+                request.getErrorMessage(), now);
+        taskCacheService.updateTaskStatus(request.getTaskId(), TaskStatus.FAILED.name());
+        failedTaskCache.put(request.getTaskId(), true);
+        log.warn("Task {} failed: {}", request.getTaskId(), request.getErrorMessage());
+    }
+
+    private void handleStatusCallback(DownloadCallbackRequest request, OfflineDownloadTask task, TaskStatus newStatus, LocalDateTime now) {
+        try {
+            taskRepository.updateStatus(request.getTaskId(), newStatus, now);
+        } catch (Exception e) {
+            log.warn("Failed to update status in DB for task {}: {}", request.getTaskId(), e.getMessage());
+        }
+        taskCacheService.updateTaskStatus(request.getTaskId(), newStatus.name());
     }
 
     public long getPendingTaskCount(String tenantId) {

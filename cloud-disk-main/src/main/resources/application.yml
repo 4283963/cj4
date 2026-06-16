@@ -21,10 +21,12 @@ spring:
       timeout: 3000ms
       lettuce:
         pool:
-          max-active: 8
-          max-wait: -1ms
-          max-idle: 8
-          min-idle: 0
+          max-active: 32
+          max-wait: 500ms
+          max-idle: 16
+          min-idle: 4
+          time-between-eviction-runs: 60000ms
+          min-evictable-idle-time: 300000ms
   rabbitmq:
     host: localhost
     port: 5672
