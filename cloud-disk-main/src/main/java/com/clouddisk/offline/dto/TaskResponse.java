@@ -14,6 +14,8 @@ public class TaskResponse {
     private String errorMessage;
     private Long downloadedSize;
     private Integer speed;
+    private Long maxSpeed;
+    private Double percentage;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
     private LocalDateTime completedAt;
@@ -22,8 +24,8 @@ public class TaskResponse {
 
     public TaskResponse(String id, String fileUrl, String fileName, String fileType, Long fileSize,
                         String savePath, String status, String statusDescription, String errorMessage,
-                        Long downloadedSize, Integer speed, LocalDateTime createdAt,
-                        LocalDateTime updatedAt, LocalDateTime completedAt) {
+                        Long downloadedSize, Integer speed, Long maxSpeed, Double percentage,
+                        LocalDateTime createdAt, LocalDateTime updatedAt, LocalDateTime completedAt) {
         this.id = id;
         this.fileUrl = fileUrl;
         this.fileName = fileName;
@@ -35,6 +37,8 @@ public class TaskResponse {
         this.errorMessage = errorMessage;
         this.downloadedSize = downloadedSize;
         this.speed = speed;
+        this.maxSpeed = maxSpeed;
+        this.percentage = percentage;
         this.createdAt = createdAt;
         this.updatedAt = updatedAt;
         this.completedAt = completedAt;
@@ -56,6 +60,8 @@ public class TaskResponse {
         private String errorMessage;
         private Long downloadedSize;
         private Integer speed;
+        private Long maxSpeed;
+        private Double percentage;
         private LocalDateTime createdAt;
         private LocalDateTime updatedAt;
         private LocalDateTime completedAt;
@@ -115,6 +121,16 @@ public class TaskResponse {
             return this;
         }
 
+        public Builder maxSpeed(Long maxSpeed) {
+            this.maxSpeed = maxSpeed;
+            return this;
+        }
+
+        public Builder percentage(Double percentage) {
+            this.percentage = percentage;
+            return this;
+        }
+
         public Builder createdAt(LocalDateTime createdAt) {
             this.createdAt = createdAt;
             return this;
@@ -132,7 +148,8 @@ public class TaskResponse {
 
         public TaskResponse build() {
             return new TaskResponse(id, fileUrl, fileName, fileType, fileSize, savePath, status,
-                    statusDescription, errorMessage, downloadedSize, speed, createdAt, updatedAt, completedAt);
+                    statusDescription, errorMessage, downloadedSize, speed, maxSpeed, percentage,
+                    createdAt, updatedAt, completedAt);
         }
     }
 
@@ -222,6 +239,22 @@ public class TaskResponse {
 
     public void setSpeed(Integer speed) {
         this.speed = speed;
+    }
+
+    public Long getMaxSpeed() {
+        return maxSpeed;
+    }
+
+    public void setMaxSpeed(Long maxSpeed) {
+        this.maxSpeed = maxSpeed;
+    }
+
+    public Double getPercentage() {
+        return percentage;
+    }
+
+    public void setPercentage(Double percentage) {
+        this.percentage = percentage;
     }
 
     public LocalDateTime getCreatedAt() {

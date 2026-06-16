@@ -10,11 +10,12 @@ public class DownloadTaskMessage implements Serializable {
     private String savePath;
     private String callbackUrl;
     private String callbackSecret;
+    private Long maxSpeed;
 
     public DownloadTaskMessage() {}
 
     public DownloadTaskMessage(String taskId, String tenantId, String fileUrl, String fileName,
-                               String savePath, String callbackUrl, String callbackSecret) {
+                               String savePath, String callbackUrl, String callbackSecret, Long maxSpeed) {
         this.taskId = taskId;
         this.tenantId = tenantId;
         this.fileUrl = fileUrl;
@@ -22,6 +23,7 @@ public class DownloadTaskMessage implements Serializable {
         this.savePath = savePath;
         this.callbackUrl = callbackUrl;
         this.callbackSecret = callbackSecret;
+        this.maxSpeed = maxSpeed;
     }
 
     public static Builder builder() {
@@ -36,6 +38,7 @@ public class DownloadTaskMessage implements Serializable {
         private String savePath;
         private String callbackUrl;
         private String callbackSecret;
+        private Long maxSpeed;
 
         public Builder taskId(String taskId) {
             this.taskId = taskId;
@@ -72,8 +75,13 @@ public class DownloadTaskMessage implements Serializable {
             return this;
         }
 
+        public Builder maxSpeed(Long maxSpeed) {
+            this.maxSpeed = maxSpeed;
+            return this;
+        }
+
         public DownloadTaskMessage build() {
-            return new DownloadTaskMessage(taskId, tenantId, fileUrl, fileName, savePath, callbackUrl, callbackSecret);
+            return new DownloadTaskMessage(taskId, tenantId, fileUrl, fileName, savePath, callbackUrl, callbackSecret, maxSpeed);
         }
     }
 
@@ -131,5 +139,13 @@ public class DownloadTaskMessage implements Serializable {
 
     public void setCallbackSecret(String callbackSecret) {
         this.callbackSecret = callbackSecret;
+    }
+
+    public Long getMaxSpeed() {
+        return maxSpeed;
+    }
+
+    public void setMaxSpeed(Long maxSpeed) {
+        this.maxSpeed = maxSpeed;
     }
 }

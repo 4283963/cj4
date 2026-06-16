@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"download-worker/internal/config"
+	"download-worker/internal/limiter"
 	"download-worker/internal/model"
 )
 
@@ -131,9 +132,12 @@ func (d *Downloader) downloadWithRetry(ctx context.Context, task model.DownloadT
 	}
 	defer outFile.Close()
 
+	tb := limiter.NewTokenBucket(task.MaxSpeed)
+
 	buf := make([]byte, d.cfg.ChunkSize)
 	startTime := time.Now()
 	lastReportTime := startTime
+	reportInterval := time.Second
 
 	for {
 		select {
@@ -144,13 +148,30 @@ func (d *Downloader) downloadWithRetry(ctx context.Context, task model.DownloadT
 
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
-			if _, writeErr := outFile.Write(buf[:n]); writeErr != nil {
-				return "", 0, "", fmt.Errorf("write file failed: %w", writeErr)
+			data := buf[:n]
+			remaining := int64(len(data))
+
+			for remaining > 0 {
+				taken, takeErr := tb.Take(ctx, remaining)
+				if takeErr != nil {
+					return "", 0, "", fmt.Errorf("rate limit error: %w", takeErr)
+				}
+				if taken <= 0 {
+					continue
+				}
+
+				startIdx := int64(len(data)) - remaining
+				endIdx := startIdx + taken
+
+				if _, writeErr := outFile.Write(data[startIdx:endIdx]); writeErr != nil {
+					return "", 0, "", fmt.Errorf("write file failed: %w", writeErr)
+				}
+				downloadedSize += taken
+				remaining -= taken
 			}
-			downloadedSize += int64(n)
 
 			now := time.Now()
-			if now.Sub(lastReportTime) >= time.Second {
+			if now.Sub(lastReportTime) >= reportInterval {
 				elapsed := now.Sub(startTime).Seconds()
 				var speed int
 				if elapsed > 0 {
@@ -165,8 +186,10 @@ func (d *Downloader) downloadWithRetry(ctx context.Context, task model.DownloadT
 				if d.progressFunc != nil {
 					d.progressFunc(model.DownloadProgress{
 						DownloadedSize: downloadedSize,
+						TotalSize:      totalSize,
 						Speed:          speed,
 						Percentage:     percentage,
+						MaxSpeed:       task.MaxSpeed,
 					})
 				}
 				lastReportTime = now

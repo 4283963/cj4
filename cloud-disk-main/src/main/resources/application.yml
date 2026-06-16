@@ -54,4 +54,5 @@ offline:
       secret: offline-callback-secret-2024
     redis:
       task-prefix: offline:task:
+      progress-prefix: offline:progress:
       ttl: 86400

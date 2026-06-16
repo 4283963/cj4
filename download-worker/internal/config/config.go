@@ -10,6 +10,7 @@ import (
 type Config struct {
 	Server   ServerConfig   `mapstructure:"server"`
 	RabbitMQ RabbitMQConfig `mapstructure:"rabbitmq"`
+	Redis    RedisConfig    `mapstructure:"redis"`
 	Download DownloadConfig `mapstructure:"download"`
 	Callback CallbackConfig `mapstructure:"callback"`
 }
@@ -29,6 +30,19 @@ type RabbitMQConfig struct {
 	RoutingKey        string        `mapstructure:"routing_key"`
 	PrefetchCount     int           `mapstructure:"prefetch_count"`
 	ReconnectInterval time.Duration `mapstructure:"reconnect_interval"`
+}
+
+type RedisConfig struct {
+	Host           string        `mapstructure:"host"`
+	Port           int           `mapstructure:"port"`
+	Password       string        `mapstructure:"password"`
+	DB             int           `mapstructure:"db"`
+	ProgressPrefix string        `mapstructure:"progress_prefix"`
+	PoolSize       int           `mapstructure:"pool_size"`
+	MinIdleConns   int           `mapstructure:"min_idle_conns"`
+	ReadTimeout    time.Duration `mapstructure:"read_timeout"`
+	WriteTimeout   time.Duration `mapstructure:"write_timeout"`
+	DialTimeout    time.Duration `mapstructure:"dial_timeout"`
 }
 
 type DownloadConfig struct {
@@ -75,6 +89,16 @@ func Load() (*Config, error) {
 	v.SetDefault("callback.timeout", "30s")
 	v.SetDefault("callback.max_retries", 5)
 	v.SetDefault("callback.retry_interval", "2s")
+	v.SetDefault("redis.host", "localhost")
+	v.SetDefault("redis.port", 6379)
+	v.SetDefault("redis.password", "")
+	v.SetDefault("redis.db", 0)
+	v.SetDefault("redis.progress_prefix", "offline:progress:")
+	v.SetDefault("redis.pool_size", 16)
+	v.SetDefault("redis.min_idle_conns", 4)
+	v.SetDefault("redis.read_timeout", "1s")
+	v.SetDefault("redis.write_timeout", "1s")
+	v.SetDefault("redis.dial_timeout", "2s")
 
 	if err := v.ReadInConfig(); err != nil {
 		fmt.Printf("Warning: config file not found, using defaults: %v\n", err)
@@ -91,4 +115,8 @@ func Load() (*Config, error) {
 func (c *RabbitMQConfig) URL() string {
 	return fmt.Sprintf("amqp://%s:%s@%s:%d%s",
 		c.Username, c.Password, c.Host, c.Port, c.Vhost)
+}
+
+func (c *RedisConfig) Addr() string {
+	return fmt.Sprintf("%s:%d", c.Host, c.Port)
 }

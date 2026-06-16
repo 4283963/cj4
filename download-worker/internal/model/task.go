@@ -8,6 +8,7 @@ type DownloadTaskMessage struct {
 	SavePath       string `json:"savePath"`
 	CallbackURL    string `json:"callbackUrl"`
 	CallbackSecret string `json:"callbackSecret"`
+	MaxSpeed       int64  `json:"maxSpeed,omitempty"`
 }
 
 type DownloadCallbackRequest struct {
@@ -24,6 +25,8 @@ type DownloadCallbackRequest struct {
 
 type DownloadProgress struct {
 	DownloadedSize int64
+	TotalSize      int64
 	Speed          int
 	Percentage     float64
+	MaxSpeed       int64
 }

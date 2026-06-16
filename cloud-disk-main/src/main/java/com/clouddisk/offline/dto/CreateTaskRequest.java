@@ -15,6 +15,8 @@ public class CreateTaskRequest {
     @Pattern(regexp = "^/.*", message = "保存路径必须以 / 开头")
     private String savePath;
 
+    private Long maxSpeed;
+
     public String getFileUrl() {
         return fileUrl;
     }
@@ -37,5 +39,13 @@ public class CreateTaskRequest {
 
     public void setSavePath(String savePath) {
         this.savePath = savePath;
+    }
+
+    public Long getMaxSpeed() {
+        return maxSpeed;
+    }
+
+    public void setMaxSpeed(Long maxSpeed) {
+        this.maxSpeed = maxSpeed;
     }
 }

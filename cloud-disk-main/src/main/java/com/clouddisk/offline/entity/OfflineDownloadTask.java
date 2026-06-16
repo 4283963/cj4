@@ -50,6 +50,8 @@ public class OfflineDownloadTask {
 
     private Integer speed;
 
+    private Long maxSpeed;
+
     @CreationTimestamp
     @Column(nullable = false, updatable = false)
     private LocalDateTime createdAt;
@@ -64,7 +66,7 @@ public class OfflineDownloadTask {
 
     public OfflineDownloadTask(String id, String tenantId, String userId, String fileUrl, String fileName,
                                String fileType, Long fileSize, String savePath, TaskStatus status,
-                               String errorMessage, Long downloadedSize, Integer speed,
+                               String errorMessage, Long downloadedSize, Integer speed, Long maxSpeed,
                                LocalDateTime createdAt, LocalDateTime updatedAt, LocalDateTime completedAt) {
         this.id = id;
         this.tenantId = tenantId;
@@ -78,6 +80,7 @@ public class OfflineDownloadTask {
         this.errorMessage = errorMessage;
         this.downloadedSize = downloadedSize;
         this.speed = speed;
+        this.maxSpeed = maxSpeed;
         this.createdAt = createdAt;
         this.updatedAt = updatedAt;
         this.completedAt = completedAt;
@@ -100,6 +103,7 @@ public class OfflineDownloadTask {
         private String errorMessage;
         private Long downloadedSize;
         private Integer speed;
+        private Long maxSpeed;
         private LocalDateTime createdAt;
         private LocalDateTime updatedAt;
         private LocalDateTime completedAt;
@@ -164,6 +168,11 @@ public class OfflineDownloadTask {
             return this;
         }
 
+        public Builder maxSpeed(Long maxSpeed) {
+            this.maxSpeed = maxSpeed;
+            return this;
+        }
+
         public Builder createdAt(LocalDateTime createdAt) {
             this.createdAt = createdAt;
             return this;
@@ -181,7 +190,7 @@ public class OfflineDownloadTask {
 
         public OfflineDownloadTask build() {
             return new OfflineDownloadTask(id, tenantId, userId, fileUrl, fileName, fileType, fileSize,
-                    savePath, status, errorMessage, downloadedSize, speed, createdAt, updatedAt, completedAt);
+                    savePath, status, errorMessage, downloadedSize, speed, maxSpeed, createdAt, updatedAt, completedAt);
         }
     }
 
@@ -279,6 +288,14 @@ public class OfflineDownloadTask {
 
     public void setSpeed(Integer speed) {
         this.speed = speed;
+    }
+
+    public Long getMaxSpeed() {
+        return maxSpeed;
+    }
+
+    public void setMaxSpeed(Long maxSpeed) {
+        this.maxSpeed = maxSpeed;
     }
 
     public LocalDateTime getCreatedAt() {

@@ -3,6 +3,7 @@ package com.clouddisk.offline.controller;
 import com.clouddisk.common.ApiResponse;
 import com.clouddisk.offline.dto.CreateTaskRequest;
 import com.clouddisk.offline.dto.CreateTaskResponse;
+import com.clouddisk.offline.dto.TaskProgressResponse;
 import com.clouddisk.offline.dto.TaskResponse;
 import com.clouddisk.offline.service.OfflineDownloadService;
 import jakarta.validation.Valid;
@@ -56,5 +57,17 @@ public class OfflineDownloadController {
 
         Page<TaskResponse> tasks = offlineDownloadService.getTaskList(tenantId, userId, pageable);
         return ApiResponse.success(tasks);
+    }
+
+    @GetMapping("/tasks/{taskId}/progress")
+    public ApiResponse<TaskProgressResponse> getTaskProgress(
+            @RequestHeader("X-Tenant-Id") String tenantId,
+            @PathVariable String taskId) {
+
+        TaskProgressResponse progress = offlineDownloadService.getTaskProgress(tenantId, taskId);
+        if (progress == null) {
+            return ApiResponse.error(404, "任务不存在");
+        }
+        return ApiResponse.success(progress);
     }
 }

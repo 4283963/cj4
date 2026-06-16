@@ -17,6 +17,7 @@ import (
 	"download-worker/internal/download"
 	"download-worker/internal/model"
 	"download-worker/internal/mq"
+	redisclient "download-worker/internal/redis"
 )
 
 type taskError struct {
@@ -46,6 +47,13 @@ func main() {
 		log.Fatalf("Create download directory failed: %v", err)
 	}
 
+	redisClient, err := redisclient.NewClient(&cfg.Redis)
+	if err != nil {
+		log.Fatalf("Connect to Redis failed: %v", err)
+	}
+	defer redisClient.Close()
+	log.Println("Connected to Redis successfully")
+
 	consumer := mq.NewConsumer(&cfg.RabbitMQ)
 	defer consumer.Close()
 
@@ -70,7 +78,7 @@ func main() {
 			ctx, cancel := context.WithTimeout(context.Background(), cfg.Download.Timeout)
 			defer cancel()
 
-			taskErr := processTask(ctx, downloader, callbackClient, task, cfg)
+			taskErr := processTask(ctx, downloader, callbackClient, redisClient, task, cfg)
 			done <- taskErr
 		}()
 
@@ -109,10 +117,14 @@ func main() {
 }
 
 func processTask(ctx context.Context, downloader *download.Downloader, callbackClient *callback.Client,
-	task model.DownloadTaskMessage, cfg *config.Config) error {
+	redisClient *redisclient.Client, task model.DownloadTaskMessage, cfg *config.Config) error {
 
 	if err := preCheckTask(ctx, downloader, task, cfg); err != nil {
 		log.Printf("Pre-check failed for task %s: %v", task.TaskID, err)
+		progress := model.DownloadProgress{
+			MaxSpeed: task.MaxSpeed,
+		}
+		_ = redisClient.UpdateProgress(context.Background(), task.TaskID, progress, "FAILED", fmt.Sprintf("预检查失败: %v", err))
 		_ = callbackClient.NotifyFailed(context.Background(), task.CallbackURL, task.CallbackSecret,
 			task.TaskID, fmt.Sprintf("预检查失败: %v", err))
 		return fatalError(err)
@@ -124,28 +136,40 @@ func processTask(ctx context.Context, downloader *download.Downloader, callbackC
 	}
 
 	_ = callbackClient.NotifyDownloading(context.Background(), task.CallbackURL, task.CallbackSecret,
-		task.TaskID, model.DownloadProgress{DownloadedSize: 0, Speed: 0, Percentage: 0})
+		task.TaskID, model.DownloadProgress{DownloadedSize: 0, Speed: 0, Percentage: 0, MaxSpeed: task.MaxSpeed})
 
 	lastCallbackTime := time.Now()
 	var lastProgress model.DownloadProgress
 
 	downloader.SetProgressCallback(func(progress model.DownloadProgress) {
+		_ = redisClient.UpdateProgress(context.Background(), task.TaskID, progress, "DOWNLOADING", "")
+
 		now := time.Now()
 		if now.Sub(lastCallbackTime) >= 10*time.Second || progress.Percentage-lastProgress.Percentage >= 5 {
 			_ = callbackClient.NotifyDownloading(context.Background(), task.CallbackURL, task.CallbackSecret,
 				task.TaskID, progress)
 			lastCallbackTime = now
 			lastProgress = progress
-			log.Printf("Task %s progress: %.2f%%, speed: %d KB/s",
-				task.TaskID, progress.Percentage, progress.Speed/1024)
+			log.Printf("Task %s progress: %.2f%%, speed: %d KB/s, maxSpeed: %d KB/s",
+				task.TaskID, progress.Percentage, progress.Speed/1024,
+				func() int {
+					if progress.MaxSpeed > 0 {
+						return int(progress.MaxSpeed / 1024)
+					}
+					return 0
+				}())
 		}
 	})
 
-	log.Printf("Start downloading task: %s, URL: %s", task.TaskID, task.FileURL)
+	log.Printf("Start downloading task: %s, URL: %s, maxSpeed: %d bytes/s", task.TaskID, task.FileURL, task.MaxSpeed)
 
 	filePath, fileSize, fileType, err := downloader.Download(ctx, task)
 	if err != nil {
 		log.Printf("Download task %s failed: %v", task.TaskID, err)
+		progress := model.DownloadProgress{
+			MaxSpeed: task.MaxSpeed,
+		}
+		_ = redisClient.UpdateProgress(context.Background(), task.TaskID, progress, "FAILED", err.Error())
 		_ = callbackClient.NotifyFailed(context.Background(), task.CallbackURL, task.CallbackSecret,
 			task.TaskID, err.Error())
 
@@ -154,6 +178,15 @@ func processTask(ctx context.Context, downloader *download.Downloader, callbackC
 		}
 		return fatalError(err)
 	}
+
+	completionProgress := model.DownloadProgress{
+		DownloadedSize: fileSize,
+		TotalSize:      fileSize,
+		Speed:          0,
+		Percentage:     100.0,
+		MaxSpeed:       task.MaxSpeed,
+	}
+	_ = redisClient.UpdateProgress(context.Background(), task.TaskID, completionProgress, "COMPLETED", "")
 
 	fileName := filepath.Base(filePath)
 	log.Printf("Download task %s completed: %s, size: %d bytes", task.TaskID, filePath, fileSize)

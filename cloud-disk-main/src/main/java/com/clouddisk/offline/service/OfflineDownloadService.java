@@ -4,6 +4,7 @@ import com.clouddisk.offline.dto.CreateTaskRequest;
 import com.clouddisk.offline.dto.CreateTaskResponse;
 import com.clouddisk.offline.dto.DownloadCallbackRequest;
 import com.clouddisk.offline.dto.DownloadTaskMessage;
+import com.clouddisk.offline.dto.TaskProgressResponse;
 import com.clouddisk.offline.dto.TaskResponse;
 import com.clouddisk.offline.entity.OfflineDownloadTask;
 import com.clouddisk.offline.entity.TenantStorage;
@@ -82,6 +83,14 @@ public class OfflineDownloadService {
             }
         }
 
+        Long maxSpeed = request.getMaxSpeed();
+        if (maxSpeed != null && maxSpeed > 0) {
+            long maxAllowedSpeed = 100 * 1024 * 1024L;
+            if (maxSpeed > maxAllowedSpeed) {
+                maxSpeed = maxAllowedSpeed;
+            }
+        }
+
         OfflineDownloadTask task = OfflineDownloadTask.builder()
                 .id(taskId)
                 .tenantId(tenantId)
@@ -91,10 +100,21 @@ public class OfflineDownloadService {
                 .savePath(request.getSavePath())
                 .status(TaskStatus.PENDING)
                 .downloadedSize(0L)
+                .maxSpeed(maxSpeed)
                 .build();
 
         taskRepository.save(task);
         taskCacheService.cacheTask(task);
+
+        TaskProgressResponse initialProgress = TaskProgressResponse.builder()
+                .taskId(taskId)
+                .status(TaskStatus.PENDING.name())
+                .downloadedSize(0L)
+                .percentage(0.0)
+                .speed(0)
+                .maxSpeed(maxSpeed)
+                .build();
+        taskCacheService.updateProgress(taskId, initialProgress);
 
         DownloadTaskMessage message = DownloadTaskMessage.builder()
                 .taskId(taskId)
@@ -104,6 +124,7 @@ public class OfflineDownloadService {
                 .savePath(request.getSavePath())
                 .callbackUrl("http://localhost:" + serverPort + "/api/v1/offline/callback")
                 .callbackSecret(callbackSecret)
+                .maxSpeed(maxSpeed)
                 .build();
 
         taskProducer.sendDownloadTask(message);
@@ -193,6 +214,24 @@ public class OfflineDownloadService {
         Long lastCallbackTime = progressCallbackCache.getIfPresent(request.getTaskId());
         long currentTime = System.currentTimeMillis();
 
+        double percentage = 0.0;
+        if (task.getFileSize() != null && task.getFileSize() > 0 && request.getDownloadedSize() != null) {
+            percentage = (double) request.getDownloadedSize() / task.getFileSize() * 100;
+        } else if (request.getDownloadedSize() != null && request.getFileSize() != null && request.getFileSize() > 0) {
+            percentage = (double) request.getDownloadedSize() / request.getFileSize() * 100;
+        }
+
+        TaskProgressResponse progress = TaskProgressResponse.builder()
+                .taskId(request.getTaskId())
+                .status(TaskStatus.DOWNLOADING.name())
+                .fileSize(task.getFileSize() != null ? task.getFileSize() : request.getFileSize())
+                .downloadedSize(request.getDownloadedSize())
+                .percentage(percentage)
+                .speed(request.getSpeed())
+                .maxSpeed(task.getMaxSpeed())
+                .build();
+        taskCacheService.updateProgress(request.getTaskId(), progress);
+
         if (lastCallbackTime != null && (currentTime - lastCallbackTime) < 3000) {
             log.debug("Progress callback too frequent for task {}, skipping DB update", request.getTaskId());
             taskCacheService.updateTaskStatus(request.getTaskId(), TaskStatus.DOWNLOADING.name());
@@ -212,11 +251,26 @@ public class OfflineDownloadService {
     }
 
     private boolean handleCompletedCallback(DownloadCallbackRequest request, OfflineDownloadTask task, LocalDateTime now) {
+        TaskProgressResponse progress = TaskProgressResponse.builder()
+                .taskId(request.getTaskId())
+                .status(TaskStatus.COMPLETED.name())
+                .fileSize(request.getFileSize())
+                .downloadedSize(request.getFileSize())
+                .percentage(100.0)
+                .speed(0)
+                .maxSpeed(task.getMaxSpeed())
+                .build();
+        taskCacheService.updateProgress(request.getTaskId(), progress);
+
         TenantStorage storage = tenantStorageRepository.findByTenantId(task.getTenantId()).orElse(null);
         if (storage == null || storage.getRemainingCapacity() < request.getFileSize()) {
             log.warn("Insufficient storage for task {}, tenant: {}, required: {}, remaining: {}",
                     request.getTaskId(), task.getTenantId(), request.getFileSize(),
                     storage != null ? storage.getRemainingCapacity() : 0);
+
+            progress.setStatus(TaskStatus.FAILED.name());
+            progress.setErrorMessage("租户存储空间不足");
+            taskCacheService.updateProgress(request.getTaskId(), progress);
 
             taskRepository.updateFailed(request.getTaskId(), TaskStatus.FAILED,
                     "租户存储空间不足", now);
@@ -230,6 +284,11 @@ public class OfflineDownloadService {
             deducted = tenantStorageRepository.deductCapacity(task.getTenantId(), request.getFileSize());
         } catch (Exception e) {
             log.error("Failed to deduct capacity for task {}: {}", request.getTaskId(), e.getMessage());
+
+            progress.setStatus(TaskStatus.FAILED.name());
+            progress.setErrorMessage("扣减存储空间失败: " + e.getMessage());
+            taskCacheService.updateProgress(request.getTaskId(), progress);
+
             taskRepository.updateFailed(request.getTaskId(), TaskStatus.FAILED,
                     "扣减存储空间失败: " + e.getMessage(), now);
             taskCacheService.updateTaskStatus(request.getTaskId(), TaskStatus.FAILED.name());
@@ -238,6 +297,10 @@ public class OfflineDownloadService {
         }
 
         if (deducted == 0) {
+            progress.setStatus(TaskStatus.FAILED.name());
+            progress.setErrorMessage("扣减存储空间失败");
+            taskCacheService.updateProgress(request.getTaskId(), progress);
+
             taskRepository.updateFailed(request.getTaskId(), TaskStatus.FAILED,
                     "扣减存储空间失败", now);
             taskCacheService.updateTaskStatus(request.getTaskId(), TaskStatus.FAILED.name());
@@ -248,13 +311,25 @@ public class OfflineDownloadService {
         taskRepository.updateCompleted(request.getTaskId(), TaskStatus.COMPLETED,
                 request.getFileSize(), request.getFileName(),
                 request.getFileType(), request.getSavePath(), now, now);
-        taskCacheService.removeTask(request.getTaskId());
 
         log.info("Task {} completed successfully, file size: {} bytes", request.getTaskId(), request.getFileSize());
         return true;
     }
 
     private void handleFailedCallback(DownloadCallbackRequest request, OfflineDownloadTask task, LocalDateTime now) {
+        TaskProgressResponse progress = TaskProgressResponse.builder()
+                .taskId(request.getTaskId())
+                .status(TaskStatus.FAILED.name())
+                .fileSize(task.getFileSize())
+                .downloadedSize(request.getDownloadedSize() != null ? request.getDownloadedSize() : task.getDownloadedSize())
+                .percentage(task.getFileSize() != null && task.getFileSize() > 0 && request.getDownloadedSize() != null
+                        ? (double) request.getDownloadedSize() / task.getFileSize() * 100 : 0.0)
+                .speed(0)
+                .maxSpeed(task.getMaxSpeed())
+                .errorMessage(request.getErrorMessage())
+                .build();
+        taskCacheService.updateProgress(request.getTaskId(), progress);
+
         taskRepository.updateFailed(request.getTaskId(), TaskStatus.FAILED,
                 request.getErrorMessage(), now);
         taskCacheService.updateTaskStatus(request.getTaskId(), TaskStatus.FAILED.name());
@@ -263,6 +338,18 @@ public class OfflineDownloadService {
     }
 
     private void handleStatusCallback(DownloadCallbackRequest request, OfflineDownloadTask task, TaskStatus newStatus, LocalDateTime now) {
+        TaskProgressResponse progress = TaskProgressResponse.builder()
+                .taskId(request.getTaskId())
+                .status(newStatus.name())
+                .fileSize(task.getFileSize())
+                .downloadedSize(task.getDownloadedSize())
+                .percentage(task.getFileSize() != null && task.getFileSize() > 0 && task.getDownloadedSize() != null
+                        ? (double) task.getDownloadedSize() / task.getFileSize() * 100 : 0.0)
+                .speed(0)
+                .maxSpeed(task.getMaxSpeed())
+                .build();
+        taskCacheService.updateProgress(request.getTaskId(), progress);
+
         try {
             taskRepository.updateStatus(request.getTaskId(), newStatus, now);
         } catch (Exception e) {
@@ -276,7 +363,48 @@ public class OfflineDownloadService {
                 List.of(TaskStatus.PENDING, TaskStatus.DOWNLOADING));
     }
 
+    public TaskProgressResponse getTaskProgress(String tenantId, String taskId) {
+        TaskProgressResponse progress = taskCacheService.getProgress(taskId);
+        if (progress == null) {
+            OfflineDownloadTask task = taskRepository.findByIdAndTenantId(taskId, tenantId).orElse(null);
+            if (task == null) {
+                return null;
+            }
+            progress = convertToProgress(task);
+            taskCacheService.updateProgress(taskId, progress);
+        }
+        return progress;
+    }
+
+    private TaskProgressResponse convertToProgress(OfflineDownloadTask task) {
+        double percentage = 0.0;
+        if (task.getFileSize() != null && task.getFileSize() > 0 && task.getDownloadedSize() != null) {
+            percentage = (double) task.getDownloadedSize() / task.getFileSize() * 100;
+        }
+        if (task.getStatus() == TaskStatus.COMPLETED) {
+            percentage = 100.0;
+        }
+        return TaskProgressResponse.builder()
+                .taskId(task.getId())
+                .status(task.getStatus().name())
+                .fileSize(task.getFileSize())
+                .downloadedSize(task.getDownloadedSize())
+                .percentage(percentage)
+                .speed(task.getSpeed() != null ? task.getSpeed() : 0)
+                .maxSpeed(task.getMaxSpeed())
+                .errorMessage(task.getErrorMessage())
+                .build();
+    }
+
     private TaskResponse toTaskResponse(OfflineDownloadTask task) {
+        double percentage = 0.0;
+        if (task.getFileSize() != null && task.getFileSize() > 0 && task.getDownloadedSize() != null) {
+            percentage = (double) task.getDownloadedSize() / task.getFileSize() * 100;
+        }
+        if (task.getStatus() == TaskStatus.COMPLETED) {
+            percentage = 100.0;
+        }
+
         return TaskResponse.builder()
                 .id(task.getId())
                 .fileUrl(task.getFileUrl())
@@ -289,6 +417,8 @@ public class OfflineDownloadService {
                 .errorMessage(task.getErrorMessage())
                 .downloadedSize(task.getDownloadedSize())
                 .speed(task.getSpeed())
+                .maxSpeed(task.getMaxSpeed())
+                .percentage(percentage)
                 .createdAt(task.getCreatedAt())
                 .updatedAt(task.getUpdatedAt())
                 .completedAt(task.getCompletedAt())
