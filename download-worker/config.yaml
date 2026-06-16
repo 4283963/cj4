@@ -1,0 +1,28 @@
+server:
+  name: download-worker
+
+rabbitmq:
+  host: localhost
+  port: 5672
+  username: guest
+  password: guest
+  vhost: /
+  queue: offline.download.queue
+  exchange: offline.download.exchange
+  routing_key: offline.download.routing
+  prefetch_count: 5
+  reconnect_interval: 5s
+
+download:
+  timeout: 3600s
+  max_retries: 3
+  retry_interval: 5s
+  chunk_size: 1048576
+  download_dir: ./downloads
+  max_concurrent: 10
+  user_agent: "DownloadWorker/1.0"
+
+callback:
+  timeout: 30s
+  max_retries: 5
+  retry_interval: 2s
